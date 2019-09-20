@@ -1,20 +1,27 @@
-
 import os
+import re
+import sys
 import boto3
 import pyspark
-from pyspark.sql import SparkSession
-from pyspark import SparkContext
-from pyspark.sql import functions as func
-from pyspark.sql.functions import col
-from pyspark.sql.functions import collect_list, size
+import psycopg2
+from pyspark import sql
+from pyspark.sql import Row
+from pyspark import SparkConf, SparkContext
+from pyspark.sql import functions
+from pyspark.sql.functions import split
+from pyspark.sql.functions import lit
 
-#pyspark settings
-# conf = pyspark.SparkConf()
-sc = pyspark.SparkContext()
+
+
+#######################################################################################################################
+# Source layer - extract columns from S3 bucket and convert it into a dataframe
+#######################################################################################################################
+conf = SparkConf().setMaster("local").setAppName("test")
+sc = SparkContext(conf = conf)
 sqlContext = pyspark.SQLContext(sc)
 
-fannie_performance_url = 's3a://mortgageinsight/fannie/performance/Performance_2018Q2.txt'
 fannie_acquisition_url = 's3a://mortgageinsight/fannie/aquisition/Acquisition_2018Q2.txt'
+fannie_performance_url = 's3a://mortgageinsight/fannie/performance/Performance_2018Q2.txt'
 
 fannie_src_acquisition_col = ["loan_seq_no",
                                    "channel",
@@ -54,7 +61,7 @@ fannie_src_performance_col = ["loan_seq_no",
                                "maturity_date",
                                "msa",
                                "cur_delinquency",
-                               "modification",
+                                "modification",
                                "zero_balance_code",
                                "zero_balance_date",
                                "last_paid_installment_date",
@@ -76,11 +83,9 @@ fannie_src_performance_col = ["loan_seq_no",
                                "servicing_activity_indicator"]
 
 
-# extract the data as tuple
 def return_data_frame(url, col_name):
-    data = sc.textFile(url)
-    data_tuple = data.map(lambda x: x.split('|')).map(lambda x: [i.encode('utf-8') for i in x])
-    data_frame = sqlContext.createDataFrame(data_tuple)
+    data_RDD = sc.textFile(fannie_acquisition_url).map(lambda x: x.split('|'))
+    data_frame = sqlContext.createDataFrame(data_RDD)
 
     for c, n in zip(data_frame.columns,col_name ):
         data_frame = data_frame.withColumnRenamed(c, n)
@@ -90,93 +95,132 @@ def return_data_frame(url, col_name):
 fannie_src_acquisition_df = return_data_frame(fannie_acquisition_url, fannie_src_acquisition_col)
 fannie_src_performance_df = return_data_frame(fannie_performance_url, fannie_src_performance_col)
 
+#######################################################################################################################
+# Work layer  - Do the requiered ETL operations :
+#   1) Add agency id columns to the dataframe
+#   2) Extract only required columns
+#######################################################################################################################
 
 
-# print(fannie_src_acquisition_df.count())
-# # 382846
-# print(fannie_src_performance_df.count())
-# # 4101014
+# define input columns
+fannie_performance_wrk_cols = ["loan_seq_no",
+                                "cur_interest_rate",
+                                "mon_to_maturity"]
 
-# multiple counts of loan sq seen
-# +------------+-----+
-# | loan_seq_no|count|
-# +------------+-----+
-# |100171598886|   11|
-# |100184220649|   11|
-# |100479120895|   10|
-# |101731318226|   12|
-# |102002153004|   11|
-# |102506541423|   12|
-# |103572342216|   11|
-# |103621263605|   11|
-# |104210018766|    6|
-# |104721213787|   11|
-# |106446493563|   10|
-# |106790893498|   12|
-# |106836342462|   12|
-# |107075129903|   10|
-# |108096970099|   11|
-# |108212638546|   10|
-# |109286231470|   10|
-# |109335311479|   12|
-# |109965216964|   10|
-# |110012043168|   12|
-# +------------+-----+
+fannie_acquisition_wrk_cols = ["loan_seq_no",
+                                # "channel",
+                                # "seller_name",
+                                "original_interest_rate",
+                                # "original_upb",
+                                # "original_loan_term",
+                                "origination_date",
+                                # "first_payment_date",
+                                # "original_ltv",
+                                # "original_cltv",
+                                "number_of_borrowers",
+                                # "original_dti",
+                                "credit_score",
+                                "first_time_homebuyer_flag",
+                                "loan_purpose",
+                                "property_type",
+                                "number_of_units",
+                                "occupancy_status",
+                                "property_state",
+                                "postal_code",
+                                # "mip",
+                                "product_type",
+                                "co_borrower_credit_score",
+                                "mortgage_insurance_type",
+                                "relocation_mortgage_indicator"]
 
+# make dataframes
+fannie_wrk_performance_df = fannie_src_performance_df.select(fannie_performance_wrk_cols)
+fannie_wrk_acquisition_df = fannie_src_acquisition_df.select(fannie_acquisition_wrk_cols)
 
-# Cannot be joined by loan-seq as they are not the same.
+# add agency names
+fannie_wrk_performance_df = fannie_wrk_performance_df.withColumn ( "agency_id" , lit("0"))
+fannie_wrk_acquisition_df = fannie_wrk_acquisition_df.withColumn ( "agency_id" , lit("0"))
 
-A = fannie_src_acquisition_df.alias('A')
-B = fannie_src_performance_df.alias('B')
+fannie_wrk_performance_df.show()
+fannie_wrk_acquisition_df.show()
 
-# Add agency name
-fannie_src_acquisition_df = fannie_src_acquisition_df.withColumn("agency_id", "fannie")
-fannie_src_acquisition_df = fannie_src_acquisition_df.withColumn("agency_id", "fannie")
-
-
-# # Add the reference dataframes
-
-first_time_home_RDD = sc.parallelize([('Y',"Yes"),
-                                      ('N',"No"),
-                                     ('9',"Not applicable")])
-
-loan_purpose_RDD = sc.parallelize([('P',"Purchase"),
-                                      ('C',"Cash-out refinance"),
-                                     ('R',"No cash-out refinance")
-                                    ,('U',"Not specified refinance")])
-channel_RDD = sc.parallelize([('R',"Retail"),
-                                      ('B',"Broker"),
-                                     ('C',"Correspondent")
-                                    ,('T',"TPO Not specified")
-                                    , ('9',"Not available")])
-
-Property_type_RDD = sc.parallelize([('Co',"Condo"),
-                                      ('PU',"PUD"),
-                                     ('MH',"Manufactured")
-                                    ,('SF',"1-4 Fee Simple")
-                                    , ('99',"Not available")])
-
-loan_purpose_data_frame = sqlContext.createDataFrame(loan_purpose_RDD)
-loan_purpose_data_frame = loan_purpose_data_frame.withColumnRenamed(loan_purpose_data_frame.columns, ["loan_purpose_id", "loan_purpose"])
-
-first_time_home_data_frame = sqlContext.createDataFrame(first_time_home_RDD)
-first_time_home_data_frame = first_time_home_data_frame.withColumnRenamed(first_time_home_RDD.columns, ["loan_purpose_id", "loan_purpose"])
-
-channel_data_frame = sqlContext.createDataFrame(channel_RDD)
-channel_data_frame = channel_data_frame.withColumnRenamed(channel_data_frame.columns, ["loan_purpose_id", "loan_purpose"])
-
-Property_type_data_frame = sqlContext.createDataFrame(Property_type_RDD)
-Property_type_data_frame = Property_type_data_frame.withColumnRenamed(Property_type_data_frame.columns, ["loan_purpose_id", "loan_purpose"])
+#######################################################################################################################
+# create reference tables
+#######################################################################################################################
+first_time_home_df = sc.parallelize([Row(first_time_home_id = 'Y',first_time_home_description = "Yes"),
+                                        Row(first_time_home_id = 'N',first_time_home_description ="No"),
+                                        Row(first_time_home_id ='9',first_time_home_description ="Not applicable")])\
+                                        .toDF()
 
 
+channel_df = sc.parallelize([Row(channel_id = 'R', channel_desc = "Retail"),
+                                    Row(channel_id = 'B',channel_desc = "Broker"),
+                                    Row(channel_id = 'C',channel_desc = "Correspondent"),
+                                    Row(channel_id = 'T',channel_desc = "TPO Not specified"),
+                                    Row(channel_id = '9', channel_desc= "Not available")]).toDF()
 
+property_type_df = sc.parallelize([Row(property_type_id = 'Co', property_type_desc = "Condo"),
+                                    Row (property_type_id = 'PU', property_type_desc = "PUD"),
+                                    Row(property_type_id ='MH', property_type_desc= "Manufactured"),
+                                    Row(property_type_id = 'SF', property_type_desc= "1-4 Fee Simple"),
+                                    Row(property_type_id = '99', Property_type_desc= "Not available")]).toDF()
+
+agency_df = sc.parallelize([Row(agency_id = "0" , agency_desc = "fannie"),
+                             Row (agency_id = "1", agency_desc = "freddie")]).toDF()
+
+
+#######################################################################################################################
+# output layer
+#######################################################################################################################
+from pyspark.sql import DataFrameReader
+
+
+url = 'postgresql://10.0.0.9:5432/test'
+
+print("setting properties")
+properties = {'user': 'postgres',
+              'password': 'db',
+              'driver':'org.postgresql.Driver'}
+
+
+print("inserting into performance")
+# insert into performance
+fannie_wrk_performance_df.write.jdbc(url='jdbc:%s' % url,
+                                     table='Performance',
+                                     properties=properties,
+                                     mode = 'append')
+
+print("inserting into acquisition")
+# insert into acquisition
+fannie_wrk_acquisition_df.write.jdbc(url='jdbc:%s' % url,
+                                     table='Acquisition',
+                                     properties=properties,
+                                     mode = 'overwrite')
+
+print("inserting into first time home")
+first_time_home_df.write.jdbc(url='jdbc:%s' % url,
+                                     table='First_Time_Home',
+                                     properties=properties,
+                                     mode = 'overwrite')
 #
+print("inserting into channel home")
+channel_df.write.jdbc(url='jdbc:%s' % url,
+                                     table='Channel_Home',
+                                     properties=properties,
+                                     mode = 'append')
+
+print("inserting into property type")
+property_type_df.write.jdbc(url='jdbc:%s' % url,
+                                     table='Property_Type',
+                                     properties=properties,
+                                     mode = 'append')
 
 
-# left_join = A.join(B, A.loan_seq_no == B.loan_seq_no, how='left') # Could also use 'left_outer'
-# left_join.filter(col('B.loan_seq_no').isNull()).show()
-# This is a bad idea
-# joined_data_frame = A.join(B, A.loan_seq_no == B.loan_seq_no, how='inner')
-# joined_data_frame.count()
+print("inserting into agency")
+agency_df.write.jdbc(url='jdbc:%s' % url,
+                                     table='Agency_Type',
+                                     properties=properties,
+                                     mode = 'append')
+
 
 
