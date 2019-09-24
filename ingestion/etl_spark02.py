@@ -3,14 +3,18 @@ import re
 import sys
 import boto3
 import pyspark
-import psycopg2
+# import psycopg2
 from pyspark import sql
 from pyspark.sql import Row
+from pyspark.sql import column
 from pyspark import SparkConf, SparkContext
 from pyspark.sql import functions
 from pyspark.sql.functions import split
 from pyspark.sql.functions import lit
-
+from pyspark.sql.functions import unix_timestamp
+from pyspark.sql.types import IntegerType
+from pyspark.sql.functions import udf
+from pyspark.sql.types import StringType
 
 
 #######################################################################################################################
@@ -20,8 +24,8 @@ conf = SparkConf().setMaster("local").setAppName("test")
 sc = SparkContext(conf = conf)
 sqlContext = pyspark.SQLContext(sc)
 
-fannie_acquisition_url = 's3a://mortgageinsight/fannie/aquisition/Acquisition_2018Q2.txt'
-fannie_performance_url = 's3a://mortgageinsight/fannie/performance/Performance_2018Q2.txt'
+fannie_acquisition_url = 's3a://mortgageinsight/fannie/aquisition/Acquisition_2010*.txt'
+fannie_performance_url = 's3a://mortgageinsight/fannie/performance/Performance_2010*.txt'
 
 fannie_src_acquisition_col = ["loan_seq_no",
                                    "channel",
@@ -83,8 +87,9 @@ fannie_src_performance_col = ["loan_seq_no",
                                "servicing_activity_indicator"]
 
 
+
 def return_data_frame(url, col_name):
-    data_RDD = sc.textFile(fannie_acquisition_url).map(lambda x: x.split('|'))
+    data_RDD = sc.textFile(url).map(lambda x: x.split('|'))
     data_frame = sqlContext.createDataFrame(data_RDD)
 
     for c, n in zip(data_frame.columns,col_name ):
@@ -95,25 +100,63 @@ def return_data_frame(url, col_name):
 fannie_src_acquisition_df = return_data_frame(fannie_acquisition_url, fannie_src_acquisition_col)
 fannie_src_performance_df = return_data_frame(fannie_performance_url, fannie_src_performance_col)
 
+# fannie_src_acquisition_df.show()
+# fannie_src_performance_df.show()
+
+
+
 #######################################################################################################################
 # Work layer  - Do the requiered ETL operations :
-#   1) Add agency id columns to the dataframe
-#   2) Extract only required columns
 #######################################################################################################################
 
+# change the date values to unix timestamp in source file and get month and year
+fannie_src_acquisition_df = fannie_src_acquisition_df.\
+    withColumn("origination_date",unix_timestamp("origination_date", "MM/yyyy").cast("double").cast("timestamp"))
 
-# define input columns
-fannie_performance_wrk_cols = ["loan_seq_no",
-                                "cur_interest_rate",
-                                "mon_to_maturity"]
+fannie_src_acquisition_df = fannie_src_acquisition_df.\
+    withColumn("origination_year", functions.year(functions.to_date(fannie_src_acquisition_df.origination_date, "MM/yyyy")))
+
+fannie_src_acquisition_df= fannie_src_acquisition_df.\
+    withColumn("origination_month",functions.month(functions.to_date(fannie_src_acquisition_df.origination_date, "MM/yyyy")))
+
+
+#replace the null credit score  with quantile medians
+fannie_src_acquisition_df = fannie_src_acquisition_df.withColumn(
+    "credit_score", fannie_src_acquisition_df["credit_score"].cast(IntegerType()))
+
+# use approximate quantile to reduce calculation cost
+credit_median = fannie_src_acquisition_df.approxQuantile("credit_score", [0.5], 0.25)
+fannie_src_acquisition_df = fannie_src_acquisition_df.na.fill("credit_score",str(credit_median))
+
+
+# cast string datatype into appropriate type
+fannie_src_acquisition_df = fannie_src_acquisition_df.withColumn(
+    "original_interest_rate",fannie_src_acquisition_df["original_interest_rate"].cast("float"))
+
+fannie_src_acquisition_df = fannie_src_acquisition_df.withColumn(
+    "credit_score",fannie_src_acquisition_df["credit_score"].cast(IntegerType()))
+
+fannie_src_acquisition_df = fannie_src_acquisition_df.withColumn(
+    "credit_score", fannie_src_acquisition_df["credit_score"].cast("float"))
+
+fannie_src_performance_df = fannie_src_performance_df.withColumn(
+    "cur_interest_rate", fannie_src_performance_df["cur_interest_rate"].cast("float"))
+
+
+
+# get the mean current interest rate from the performance file, grouped by loan seq number
+fannie_wrk_performance_df= fannie_src_performance_df.groupBy("loan_seq_no"). \
+    agg(functions.mean("cur_interest_rate").alias("avg_current_interest_rate"))
 
 fannie_acquisition_wrk_cols = ["loan_seq_no",
-                                # "channel",
+                                "channel",
                                 # "seller_name",
                                 "original_interest_rate",
                                 # "original_upb",
                                 # "original_loan_term",
                                 "origination_date",
+                                "origination_year",
+                                 "origination_month",
                                 # "first_payment_date",
                                 # "original_ltv",
                                 # "original_cltv",
@@ -131,22 +174,24 @@ fannie_acquisition_wrk_cols = ["loan_seq_no",
                                 "product_type",
                                 "co_borrower_credit_score",
                                 "mortgage_insurance_type",
-                                "relocation_mortgage_indicator"]
-
+                                "relocation_mortgage_indicator"
+                               ]
+#
 # make dataframes
-fannie_wrk_performance_df = fannie_src_performance_df.select(fannie_performance_wrk_cols)
 fannie_wrk_acquisition_df = fannie_src_acquisition_df.select(fannie_acquisition_wrk_cols)
 
-# add agency names
+
+# add agency id
 fannie_wrk_performance_df = fannie_wrk_performance_df.withColumn ( "agency_id" , lit("0"))
 fannie_wrk_acquisition_df = fannie_wrk_acquisition_df.withColumn ( "agency_id" , lit("0"))
 
-fannie_wrk_performance_df.show()
-fannie_wrk_acquisition_df.show()
+#
+# fannie_wrk_performance_df.show()
+# fannie_wrk_acquisition_df.show()
 
 #######################################################################################################################
 # create reference tables
-#######################################################################################################################
+# #######################################################################################################################
 first_time_home_df = sc.parallelize([Row(first_time_home_id = 'Y',first_time_home_description = "Yes"),
                                         Row(first_time_home_id = 'N',first_time_home_description ="No"),
                                         Row(first_time_home_id ='9',first_time_home_description ="Not applicable")])\
@@ -187,12 +232,13 @@ agency_df = sc.parallelize([Row(agency_id = "0" , agency_desc = "fannie"),
 from pyspark.sql import DataFrameReader
 
 
-url = 'postgresql://10.0.0.9:5432/test'
+url = 'postgresql://10.0.0.9:5432/mortgage_2010'
 
 print("setting properties")
-properties = {'user': 'postgres',
-              'password': 'db',
-              'driver':'org.postgresql.Driver'}
+properties = {'user': 'user_name',
+              'password': 'password',
+              'driver':'org.postgresql.Driver' ,
+              'numPartitions': '1000'}
 
 
 print("inserting into performance")
@@ -200,67 +246,68 @@ print("inserting into performance")
 fannie_wrk_performance_df.write.jdbc(url='jdbc:%s' % url,
                                      table='Performance',
                                      properties=properties,
-                                     mode = 'append')
-# #
-# print("inserting into acquisition")
-# # insert into acquisition
-# fannie_wrk_acquisition_df.write.jdbc(url='jdbc:%s' % url,
-#                                      table='Acquisition',
-#                                      properties=properties,
-#                                      mode = 'overwrite')
-#
-# print("inserting into first time home")
-# first_time_home_df.write.jdbc(url='jdbc:%s' % url,
-#                                      table='First_Time_Home',
-#                                      properties=properties,
-#                                      mode = 'overwrite')
-# #
-# print("inserting into channel home")
-# channel_df.write.jdbc(url='jdbc:%s' % url,
-#                                      table='Channel_Home',
-#                                      properties=properties,
-#                                      mode = 'append')
-#
-# print("inserting into property type")
-# property_type_df.write.jdbc(url='jdbc:%s' % url,
-#                                      table='Property_Type',
-#                                      properties=properties,
-#                                      mode = 'append')
-#
-#
-# print("inserting into agency")
-# agency_df.write.jdbc(url='jdbc:%s' % url,
-#                                      table='Agency_Type',
-#                                      properties=properties,
-#                                      mode = 'append')
+                                     mode = 'overwrite')
+
+print("inserting into acquisition")
+#insert into acquisition
+fannie_wrk_acquisition_df.write.jdbc(url='jdbc:%s' % url,
+                                     table='Acquisition',
+                                     properties=properties,
+                                     mode = 'overwrite')
+
+print("inserting into first time home")
+first_time_home_df.write.jdbc(url='jdbc:%s' % url,
+                                     table='First_Time_Home',
+                                     properties=properties,
+                                     mode = 'overwrite')
+
+print("inserting into channel home")
+channel_df.write.jdbc(url='jdbc:%s' % url,
+                                     table='Channel_Home',
+                                     properties=properties,
+                                     mode = 'overwrite')
+
+print("inserting into property type")
+property_type_df.write.jdbc(url='jdbc:%s' % url,
+                                     table='Property_Type',
+                                     properties=properties,
+                                     mode = 'overwrite')
+
+
+print("inserting into agency")
+agency_df.write.jdbc(url='jdbc:%s' % url,
+                                     table='Agency_Type',
+                                     properties=properties,
+                                     mode = 'overwrite')
 
 
 
-#insert into
+
 #######################################################################################################################
 # connection via psycopg2
 #######################################################################################################################
-# try:
-#     connection = psycopg2.connect(host = "ec2-54-87-220-213.compute-1.amazonaws.com"
-#                                   , database = "test"
-#                                   , user = "postgres"
-#                                   , password = "db"
-#                                   , port = '5432')
-#
-# except:
-#     print("Not connecting to postgres")
-#
-# cursor = connection.cursor()
-#
-#
-# cur.executemany("""INSERT INTO bar(first_name,last_name) VALUES (%(first_name)s, %(last_name)s)""", namedict)
-#
-#
-# connection.commit() # Important!
-#
-# cursor.execute('''SELECT * FROM playground''')
-#
-# print(cursor.fetchall())
-#
-# cursor.close()
-# connection.close()
+# # # try:
+# # #     connection = psycopg2.connect(host = "ec2-54-87-220-213.compute-1.amazonaws.com"
+# # #                                   , database = "test"
+# # #                                   , user = "postgres"
+# # #                                   , password = "db"
+# # #                                   , port = '5432')
+# # #
+# # # except:
+# # #     print("Not connecting to postgres")
+# # #
+# # # cursor = connection.cursor()
+# # #
+# # #
+# # # cur.executemany("""INSERT INTO bar(first_name,last_name) VALUES (%(first_name)s, %(last_name)s)""", namedict)
+# # #
+# # #
+# # # connection.commit() # Important!
+# # #
+# # # cursor.execute('''SELECT * FROM playground''')
+# # #
+# # # print(cursor.fetchall())
+# # #
+# # # cursor.close()
+# # # connection.close()
+
