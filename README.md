@@ -13,8 +13,7 @@ To illustrate this potential, I have taken single family home data from Fannie M
 
 I have used S3,  Spark , PostgreSQL and tableau for this pipeline as shown below. The architecture accommodates the need for batch updates at the later stages.
 
-
-![](/Users/Suha/Insight/images/Screen Shot 2019-09-29 at 12.52.25 PM.png)
+![Architexture diagram](/Users/Suha/Insight/images/Screen Shot 2019-09-29 at 12.52.25 PM.png)
 
 ####S3
 Freddie Mac and Fannie Mae data are loaded into S3 from the following sources.
