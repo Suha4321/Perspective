@@ -34,7 +34,7 @@ The data is read into pyspark from S3. The process also accommodates the need fo
 5)	Create the final dataset for the PostgreSQL
 
 ####PostgreSQL
-The data from pyspark is transferred to PostgreSQL on AWS instance using the JDBC driver. The data stored is now about 24 GB in size and has about 39 million rows per table. An additional output schema is included to aggregate results by state for presenting in Tableau
+The data from pyspark is transferred to PostgreSQL on AWS instance using the JDBC driver. The data stored is about 24 GB in size and has about 39 million rows per table. An additional output schema is included to aggregate results by state for presenting in Tableau
 
 ####Tableau
 The desktop Tableau version is connected to the AWS Postgres instance.
