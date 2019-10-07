@@ -14,7 +14,7 @@ To illustrate this potential, I have taken single family home data from Fannie M
 I have used S3,  Spark , PostgreSQL and tableau for this pipeline as shown below. The architecture accommodates the need for batch updates at the later stages.
 
 
-<img width="911" alt="Screen Shot 2019-09-29 at 10 32 19 AM" src="https://user-images.githubusercontent.com/11857298/66124363-289fa000-e5b2-11e9-9b78-247c18ea9411.png">
+<img width="706" alt="Screen Shot 2019-10-07 at 10 34 46 AM" src="https://user-images.githubusercontent.com/11857298/66321265-4e001700-e8ee-11e9-990b-3df0e04bb1cc.png">
 
 
 
