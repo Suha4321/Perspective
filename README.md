@@ -9,9 +9,9 @@ For all these kinds of dashboard, the typical turnover cycle varies from 2 week 
 
 ## How is it being implemented?
 
-To illustrate this potential, I have taken single family home data from Fannie Mae and Freddie Mac (about 250 GB combined) and have cleaned, validated and standardized the data to provide a visualization. The project also generates table for visualisation based on user input. It is a feature to enable easier visual creation with tableau.
+To illustrate this potential, I have taken single family home data from Fannie Mae and Freddie Mac (about 300 files amounting to 250 GB) and have cleaned, validated and standardized the data to provide a visualization. The project also generates table for visualisation based on user input. It is a feature to enable easier visual creation with tableau.
 
-I have used S3,  Spark , PostgreSQL and tableau for this pipeline as shown below. The architecture accommodates the need for batch updates at the later stages.
+I have used S3,  Spark , PostgreSQL, Flask and tableau for this pipeline as shown below. The architecture accommodates the need for batch updates.
 
 
 <img width="706" alt="Screen Shot 2019-10-07 at 10 34 46 AM" src="https://user-images.githubusercontent.com/11857298/66321265-4e001700-e8ee-11e9-990b-3df0e04bb1cc.png">
@@ -33,8 +33,12 @@ The data is read into pyspark from S3. The process also accommodates the need fo
 4)	Flag outlier values
 5)	Create the final dataset for the PostgreSQL
 
+In batch updates, to impute the median value for the credit score, there is a need to reference the credit score distibutiion from the previous run of the data. This is done by simply storing the credit score distribution until the previous run in S3 in a JSON format. For each batch run, this is updated and used for median imputation.
+
 #### PostgreSQL
-The data from pyspark is transferred to PostgreSQL on AWS instance using the JDBC driver. The data stored is about 24 GB in size and has about 39 million rows per table. An additional output schema is included to aggregate results by state for presenting in Tableau
+The data from pyspark is transferred to PostgreSQL on AWS instance using the JDBC driver. The data stored is about 24 GB in size and has about 39 million rows per table. An additional output schema is included to aggregate results by state for presenting in Tableau.
+
+In order to facilitate visualisation tables, the user is able to key in a column name in the the browser. This input is then used to generate tables in postgres for the new visualisation. This is a way of implementing fexible schema in postgres.
 
 #### Tableau
 The desktop Tableau version is connected to the AWS Postgres instance.
@@ -43,8 +47,6 @@ The desktop Tableau version is connected to the AWS Postgres instance.
 User inputs the required feature to generate the base tables for the visualisation.
 
 ## Folder structure
-
-
 1) Spark folder - The one time and the batch extract, load and transform (ELT) scripts are stored in this folder
 2) Postgres folder - The input schema and the visualization schema table creation scripts are stored in this folder
 3) Frontend - The scripts to get the user input and generate tables for visualisation are stored in this folder
